@@ -32,6 +32,7 @@ import haveno.desktop.main.account.content.backup.BackupView;
 import haveno.desktop.main.account.content.cryptoaccounts.CryptoAccountsView;
 import haveno.desktop.main.account.content.password.PasswordView;
 import haveno.desktop.main.account.content.seedwords.SeedWordsView;
+import haveno.desktop.main.account.content.notifications.MobileNotificationsView;
 import haveno.desktop.main.account.content.traditionalaccounts.TraditionalAccountsView;
 import haveno.desktop.main.account.content.walletinfo.WalletInfoView;
 import haveno.desktop.main.account.register.arbitrator.ArbitratorRegistrationView;
@@ -56,7 +57,7 @@ public class AccountView extends ActivatableView<TabPane, Void> {
 
     @FXML
     Tab traditionalAccountsTab, cryptoAccountsTab,
-            passwordTab, seedWordsTab, walletInfoTab, backupTab;
+            passwordTab, seedWordsTab, walletInfoTab, backupTab, notificationTab;
 
     private Navigation.Listener navigationListener;
     private ChangeListener<Tab> tabChangeListener;
@@ -90,6 +91,7 @@ public class AccountView extends ActivatableView<TabPane, Void> {
         cryptoAccountsTab.setText(Res.get("account.menu.altCoinsAccountView").toUpperCase());
         passwordTab.setText(Res.get("account.menu.password").toUpperCase());
         seedWordsTab.setText(Res.get("account.menu.seedWords").toUpperCase());
+        notificationTab.setText(Res.get("account.menu.notifications").toUpperCase());
         //walletInfoTab.setText(Res.get("account.menu.walletInfo").toUpperCase());
         backupTab.setText(Res.get("account.menu.backup").toUpperCase());
 
@@ -156,6 +158,8 @@ public class AccountView extends ActivatableView<TabPane, Void> {
                 navigation.navigateTo(MainView.class, AccountView.class, PasswordView.class);
             } else if (newValue == seedWordsTab && selectedTab != seedWordsTab) {
                 navigation.navigateTo(MainView.class, AccountView.class, SeedWordsView.class);
+            } else if (newValue == notificationTab && selectedTab != notificationTab) {
+                navigation.navigateTo(MainView.class, AccountView.class, MobileNotificationsView.class);
             } else if (newValue == walletInfoTab && selectedTab != walletInfoTab) {
                 navigation.navigateTo(MainView.class, AccountView.class, WalletInfoView.class);
             } else if (newValue == backupTab && selectedTab != backupTab) {
@@ -246,6 +250,8 @@ public class AccountView extends ActivatableView<TabPane, Void> {
                 navigation.navigateTo(MainView.class, AccountView.class, PasswordView.class);
             else if (root.getSelectionModel().getSelectedItem() == seedWordsTab)
                 navigation.navigateTo(MainView.class, AccountView.class, SeedWordsView.class);
+            else if (root.getSelectionModel().getSelectedItem() == notificationTab)
+                navigation.navigateTo(MainView.class, AccountView.class, MobileNotificationsView.class);
             else if (root.getSelectionModel().getSelectedItem() == walletInfoTab)
                 navigation.navigateTo(MainView.class, AccountView.class, WalletInfoView.class);
             else if (root.getSelectionModel().getSelectedItem() == backupTab)
@@ -300,6 +306,8 @@ public class AccountView extends ActivatableView<TabPane, Void> {
             selectedTab = passwordTab;
         } else if (view instanceof SeedWordsView) {
             selectedTab = seedWordsTab;
+        } else if (view instanceof MobileNotificationsView) {
+            selectedTab = notificationTab;
         } else if (view instanceof WalletInfoView) {
             selectedTab = walletInfoTab;
         } else if (view instanceof BackupView) {
