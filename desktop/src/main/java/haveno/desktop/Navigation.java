@@ -30,6 +30,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import lombok.Getter;
@@ -49,17 +50,18 @@ public final class Navigation implements PersistedDataHost {
     // prevent invalid array modification
     private final CopyOnWriteArraySet<Listener> listeners = new CopyOnWriteArraySet<>();
     private final PersistenceManager<NavigationPath> persistenceManager;
-    private ViewPath currentPath;
+    private final ReentrantReadWriteLock navigationLock = new ReentrantReadWriteLock();
+    private volatile ViewPath currentPath;
     // Used for returning to the last important view. After setup is done we want to
     // return to the last opened view (e.g. sell/buy)
-    private ViewPath returnPath;
+    private volatile ViewPath returnPath;
     // this string is updated just before saving to disk so it reflects the latest currentPath situation.
     private final NavigationPath navigationPath = new NavigationPath();
 
     // Persisted fields
     @Getter
     @Setter
-    private ViewPath previousPath = DEFAULT_VIEW_PATH;
+    private volatile ViewPath previousPath = DEFAULT_VIEW_PATH;
 
 
     @Inject
@@ -72,24 +74,29 @@ public final class Navigation implements PersistedDataHost {
     @Override
     public void readPersisted(Runnable completeHandler) {
         persistenceManager.readPersisted(persisted -> {
-                    List<Class<? extends View>> viewClasses = persisted.getPath().stream()
-                            .map(className -> {
-                                try {
-                                    return (Class<? extends View>) Class.forName(className).asSubclass(View.class);
-                                } catch (ClassNotFoundException e) {
-                                    log.warn("Could not find the viewPath class {}; exception: {}", className, e);
-                                }
-                                return null;
-                            })
-                            .filter(Objects::nonNull)
-                            .collect(Collectors.toList());
+            List<Class<? extends View>> viewClasses = persisted.getPath().stream()
+                    .map(className -> {
+                        try {
+                            return (Class<? extends View>) Class.forName(className).asSubclass(View.class);
+                        } catch (ClassNotFoundException e) {
+                            log.warn("Could not find the viewPath class {}; exception: {}", className, e);
+                        }
+                        return null;
+                    })
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
 
-                    if (!viewClasses.isEmpty()) {
-                        previousPath = new ViewPath(viewClasses);
-                    }
-                    completeHandler.run();
-                },
-                completeHandler);
+            if (!viewClasses.isEmpty()) {
+                navigationLock.writeLock().lock();
+                try {
+                    previousPath = new ViewPath(viewClasses);
+                } finally {
+                    navigationLock.writeLock().unlock();
+                }
+            }
+            completeHandler.run();
+        },
+        completeHandler);
     }
 
     @SafeVarargs
@@ -106,24 +113,29 @@ public final class Navigation implements PersistedDataHost {
         if (newPath == null)
             return;
 
-        ArrayList<Class<? extends View>> temp = new ArrayList<>();
-        for (int i = 0; i < newPath.size(); i++) {
-            Class<? extends View> viewClass = newPath.get(i);
-            temp.add(viewClass);
-            if (currentPath == null ||
-                    (currentPath.size() > i &&
-                            viewClass != currentPath.get(i) &&
-                            i != newPath.size() - 1)) {
-                ArrayList<Class<? extends View>> temp2 = new ArrayList<>(temp);
-                for (int n = i + 1; n < newPath.size(); n++) {
-                    //noinspection unchecked
-                    Class<? extends View>[] newTemp = new Class[i + 1];
-                    currentPath = ViewPath.to(temp2.toArray(newTemp));
-                    navigateTo(currentPath, data);
-                    viewClass = newPath.get(n);
-                    temp2.add(viewClass);
+        navigationLock.writeLock().lock();
+        try {
+            ArrayList<Class<? extends View>> temp = new ArrayList<>();
+            for (int i = 0; i < newPath.size(); i++) {
+                Class<? extends View> viewClass = newPath.get(i);
+                temp.add(viewClass);
+                if (currentPath == null ||
+                        (currentPath.size() > i &&
+                                viewClass != currentPath.get(i) &&
+                                i != newPath.size() - 1)) {
+                    ArrayList<Class<? extends View>> temp2 = new ArrayList<>(temp);
+                    for (int n = i + 1; n < newPath.size(); n++) {
+                        //noinspection unchecked
+                        Class<? extends View>[] newTemp = new Class[i + 1];
+                        currentPath = ViewPath.to(temp2.toArray(newTemp));
+                        navigateTo(currentPath, data);
+                        viewClass = newPath.get(n);
+                        temp2.add(viewClass);
+                    }
                 }
             }
+        } finally {
+            navigationLock.writeLock().unlock();
         }
 
         currentPath = newPath;
@@ -147,11 +159,21 @@ public final class Navigation implements PersistedDataHost {
     }
 
     public void addListener(Listener listener) {
-        listeners.add(listener);
+        navigationLock.writeLock().lock();
+        try {
+            listeners.add(listener);
+        } finally {
+            navigationLock.writeLock().unlock();
+        }
     }
 
     public void removeListener(Listener listener) {
-        listeners.remove(listener);
+        navigationLock.writeLock().lock();
+        try {
+            listeners.remove(listener);
+        } finally {
+            navigationLock.writeLock().unlock();
+        }
     }
 
     public ViewPath getReturnPath() {
