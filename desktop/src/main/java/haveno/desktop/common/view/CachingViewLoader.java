@@ -19,13 +19,13 @@ package haveno.desktop.common.view;
 
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 @Singleton
 public class CachingViewLoader implements ViewLoader {
 
-    private final Map<Class<? extends View>, View> cache = new HashMap<>();
+    private final ConcurrentMap<Class<? extends View>, View> cache = new ConcurrentHashMap<>();
     private final ViewLoader viewLoader;
 
     @Inject
@@ -35,15 +35,20 @@ public class CachingViewLoader implements ViewLoader {
 
     @Override
     public View load(Class<? extends View> viewClass) {
-        if (cache.containsKey(viewClass))
-            return cache.get(viewClass);
-
+        // Attempt to retrieve the view from the cache
+        View cachedView = cache.get(viewClass);
+        if (cachedView != null) {
+            return cachedView; // Return cached view if present
+        }
+        // Load the view if not in cache
         View view = viewLoader.load(viewClass);
-        cache.put(viewClass, view);
-        return view;
+        // Cache the loaded view only if it was not already cached
+        View existingView = cache.putIfAbsent(viewClass, view);
+        return existingView != null ? existingView : view; // Return the cached view if it was added by another thread
     }
 
     public void removeFromCache(Class<? extends View> viewClass) {
         cache.remove(viewClass);
     }
 }
+
