@@ -20,20 +20,31 @@ package haveno.desktop.common.support;
 import haveno.desktop.common.view.AbstractView;
 import haveno.desktop.common.view.CachingViewLoader;
 import haveno.desktop.common.view.ViewLoader;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static org.mockito.BDDMockito.then;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.when;
 
 public class CachingViewLoaderTests {
 
+    private ViewLoader delegateViewLoader;
+    private ViewLoader cachingViewLoader;
+
+    @BeforeEach
+    public void setUp() {
+        delegateViewLoader = mock(ViewLoader.class);
+        cachingViewLoader = new CachingViewLoader(delegateViewLoader);
+
+        // Configure the mock to return valid View objects
+        when(delegateViewLoader.load(TestView1.class)).thenReturn(new TestView1());
+        when(delegateViewLoader.load(TestView2.class)).thenReturn(new TestView2());
+    }
+
     @Test
     public void test() {
-        ViewLoader delegateViewLoader = mock(ViewLoader.class);
-
-        ViewLoader cachingViewLoader = new CachingViewLoader(delegateViewLoader);
-
         cachingViewLoader.load(TestView1.class);
         cachingViewLoader.load(TestView1.class);
         cachingViewLoader.load(TestView2.class);
@@ -43,13 +54,15 @@ public class CachingViewLoaderTests {
         then(delegateViewLoader).should(times(0)).load(TestView3.class);
     }
 
-
     static class TestView1 extends AbstractView {
     }
 
     static class TestView2 extends AbstractView {
     }
 
+    static class TestView3 extends AbstractView {
+    }
+}
     static class TestView3 extends AbstractView {
     }
 }
