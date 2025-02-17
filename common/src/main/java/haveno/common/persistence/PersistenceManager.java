@@ -41,13 +41,13 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import javax.annotation.Nullable;
 import lombok.Getter;
@@ -76,8 +76,8 @@ public class PersistenceManager<T extends PersistableEnvelope> {
     // Static
     ///////////////////////////////////////////////////////////////////////////////////////////
 
-    public static final Map<String, PersistenceManager<?>> ALL_PERSISTENCE_MANAGERS = new HashMap<>();
-    private static boolean flushAtShutdownCalled;
+    public static final ConcurrentHashMap<String, PersistenceManager<?>> ALL_PERSISTENCE_MANAGERS = new ConcurrentHashMap<>();
+    private static final AtomicBoolean flushAtShutdownCalled = new AtomicBoolean(false);
     private static final AtomicBoolean allServicesInitialized = new AtomicBoolean(false);
 
     public static void onAllServicesInitialized() {
@@ -86,7 +86,7 @@ public class PersistenceManager<T extends PersistableEnvelope> {
         ALL_PERSISTENCE_MANAGERS.values().forEach(persistenceManager -> {
             // In case we got a requestPersistence call before we got initialized we trigger
             // the timer for the persist call
-            if (persistenceManager.persistenceRequested) {
+            if (persistenceManager.persistenceRequested.get()) {
                 persistenceManager.maybeStartTimerForPersistence();
             }
         });
@@ -105,7 +105,7 @@ public class PersistenceManager<T extends PersistableEnvelope> {
      */
     public static void reset() {
         ALL_PERSISTENCE_MANAGERS.clear();
-        flushAtShutdownCalled = false;
+        flushAtShutdownCalled.set(false);
         allServicesInitialized.set(false);
     }
 
@@ -123,12 +123,10 @@ public class PersistenceManager<T extends PersistableEnvelope> {
         // We don't know from which thread we are called so we map to user thread
         UserThread.execute(() -> {
             if (doShutdown) {
-                if (flushAtShutdownCalled) {
+                if (flushAtShutdownCalled.getAndSet(true)) {
                     log.warn("We got flushAllDataToDisk called again. This can happen in some rare cases. We ignore the repeated call.");
                     return;
                 }
-
-                flushAtShutdownCalled = true;
             }
 
             log.info("Start flushAllDataToDisk");
@@ -139,7 +137,7 @@ public class PersistenceManager<T extends PersistableEnvelope> {
                 completeHandler.handleResult();
             }
 
-            new HashSet<>(ALL_PERSISTENCE_MANAGERS.values()).forEach(persistenceManager -> {
+            new CopyOnWriteArraySet<>(ALL_PERSISTENCE_MANAGERS.values()).forEach(persistenceManager -> {
                 // For Priority.HIGH data we want to write to disk in any case to be on the safe side if we might have missed
                 // a requestPersistence call after an important state update. Those are usually rather small data stores.
                 // Otherwise we only persist if requestPersistence was called since the last persist call.
@@ -147,7 +145,7 @@ public class PersistenceManager<T extends PersistableEnvelope> {
                 // read the data, which would lead to a write of empty data
                 // (fixes https://github.com/bisq-network/bisq/issues/4844).
                 if (persistenceManager.readCalled.get() &&
-                        (persistenceManager.source.flushAtShutDown || persistenceManager.persistenceRequested)) {
+                        (persistenceManager.source.get().isFlushAtShutDown() || persistenceManager.persistenceRequested.get())) {
 
                     // We always get our completeHandler called even if exceptions happen. In case a file write fails
                     // we still call our shutdown and count down routine as the completeHandler is triggered in any case.
@@ -220,17 +218,18 @@ public class PersistenceManager<T extends PersistableEnvelope> {
     private final CorruptedStorageFileHandler corruptedStorageFileHandler;
     @Nullable
     private final KeyRing keyRing;
-    private File storageFile;
-    private T persistable;
-    private String fileName;
-    private Source source = Source.PRIVATE_LOW_PRIO;
-    private Path usedTempFilePath;
-    private volatile boolean persistenceRequested;
+    private final AtomicReference<File> storageFile = new AtomicReference<>();
+    private final AtomicReference<T> persistable = new AtomicReference<>();
+    private final AtomicReference<String> fileName = new AtomicReference<>();
+    private final AtomicReference<Source> source = new AtomicReference<>(Source.PRIVATE_LOW_PRIO);
+    private final AtomicReference<Path> usedTempFilePath = new AtomicReference<>();
+    private final AtomicBoolean persistenceRequested = new AtomicBoolean(false);
     @Nullable
     private Timer timer;
     private ExecutorService writeToDiskExecutor;
     public final AtomicBoolean initCalled = new AtomicBoolean(false);
     public final AtomicBoolean readCalled = new AtomicBoolean(false);
+    private final Object writeLock = new Object();
 
     ///////////////////////////////////////////////////////////////////////////////////////////
     // Constructor
@@ -256,7 +255,7 @@ public class PersistenceManager<T extends PersistableEnvelope> {
     }
 
     public void initialize(T persistable, String fileName, Source source) {
-        if (flushAtShutdownCalled) {
+        if (flushAtShutdownCalled.get()) {
             log.warn("We have started the shut down routine already. We ignore that initialize call.");
             return;
         }
@@ -279,15 +278,15 @@ public class PersistenceManager<T extends PersistableEnvelope> {
 
         initCalled.set(true);
 
-        this.persistable = persistable;
-        this.fileName = fileName;
-        this.source = source;
-        storageFile = new File(dir, fileName);
+        this.persistable.set(persistable);
+        this.fileName.set(fileName);
+        this.source.set(source);
+        storageFile.set(new File(dir, fileName));
         ALL_PERSISTENCE_MANAGERS.put(fileName, this);
     }
 
     public void shutdown() {
-        ALL_PERSISTENCE_MANAGERS.remove(fileName);
+        ALL_PERSISTENCE_MANAGERS.remove(fileName.get());
 
         if (timer != null) {
             timer.stop();
@@ -309,7 +308,7 @@ public class PersistenceManager<T extends PersistableEnvelope> {
      * @param orElse        Called if no file exists or reading of file failed.
      */
     public void readPersisted(Consumer<T> resultHandler, Runnable orElse) {
-        readPersisted(checkNotNull(fileName), resultHandler, orElse);
+        readPersisted(checkNotNull(fileName.get()), resultHandler, orElse);
     }
 
     /**
@@ -321,7 +320,7 @@ public class PersistenceManager<T extends PersistableEnvelope> {
      * @param orElse        Called if no file exists or reading of file failed.
      */
     public void readPersisted(String fileName, Consumer<T> resultHandler, Runnable orElse) {
-        if (flushAtShutdownCalled) {
+        if (flushAtShutdownCalled.get()) {
             log.warn("We have started the shut down routine already. We ignore that readPersisted call.");
             return;
         }
@@ -342,32 +341,34 @@ public class PersistenceManager<T extends PersistableEnvelope> {
 
     // API for synchronous reading of data. Not recommended to be used in application code.
     // Currently used by tests and monitor. Should be converted to the threaded API as well.
-    @Nullable
-    public T getPersisted() {
-        return getPersisted(checkNotNull(fileName));
+@Nullable
+public T getPersisted() {
+    return getPersisted(checkNotNull(fileName.get()));
+}
+
+@Nullable
+public T getPersisted(String fileName) {
+    if (flushAtShutdownCalled.get()) {
+        log.warn("We have started the shut down routine already. We ignore that getPersisted call.");
+        return null;
+    }
+    if (keyRing != null && !keyRing.isUnlocked()) {
+        log.warn("Account is not open yet, ignoring getPersisted.");
+        return null;
     }
 
-    @Nullable
-    public T getPersisted(String fileName) {
-        if (flushAtShutdownCalled) {
-            log.warn("We have started the shut down routine already. We ignore that getPersisted call.");
-            return null;
-        }
-        if (keyRing != null && !keyRing.isUnlocked()) {
-            log.warn("Account is not open yet, ignoring getPersisted.");
-            return null;
-        }
+    readCalled.set(true);
 
-        readCalled.set(true);
+    File storageFile = new File(dir, fileName);
+    if (!storageFile.exists()) {
+        log.warn("File {} does not exist.", fileName);
+        return null;
+    }
 
-        File storageFile = new File(dir, fileName);
-        if (!storageFile.exists()) {
-            return null;
-        }
-
-        long ts = System.currentTimeMillis();
-        try (FileInputStream fileInputStream = new FileInputStream(storageFile)) {
-            protobuf.PersistableEnvelope proto;
+    long ts = System.currentTimeMillis();
+    try (FileInputStream fileInputStream = new FileInputStream(storageFile)) {
+        protobuf.PersistableEnvelope proto;
+        synchronized (this) {
             if (keyRing != null) {
                 byte[] encryptedBytes = fileInputStream.readAllBytes();
                 try {
@@ -375,41 +376,44 @@ public class PersistenceManager<T extends PersistableEnvelope> {
                     proto = protobuf.PersistableEnvelope.parseFrom(decryptedBytes);
                 } catch (CryptoException ce) {
                     log.warn("Expected encrypted persisted file, attempting to getPersisted without decryption");
-                    ByteArrayInputStream bs = new ByteArrayInputStream(encryptedBytes);
-                    proto = protobuf.PersistableEnvelope.parseDelimitedFrom(bs);
+                    proto = protobuf.PersistableEnvelope.parseDelimitedFrom(new ByteArrayInputStream(encryptedBytes));
                 }
             } else {
                 proto = protobuf.PersistableEnvelope.parseDelimitedFrom(fileInputStream);
             }
+        }
 
-            //noinspection unchecked
-            T persistableEnvelope = (T) persistenceProtoResolver.fromProto(proto);
-            log.info("Reading {} completed in {} ms", fileName, System.currentTimeMillis() - ts);
-            return persistableEnvelope;
-        } catch (Throwable t) {
-            log.error("Reading {} failed with {}.", fileName, t.getMessage());
-            try {
-                // We keep a backup which might be used for recovery
-                FileUtil.removeAndBackupFile(dir, storageFile, fileName, "backup_of_corrupted_data");
-                DevEnv.logErrorAndThrowIfDevMode(t.toString());
-            } catch (IOException e1) {
-                e1.printStackTrace();
-                log.error(e1.getMessage());
-                // We swallow Exception if backup fails
-            }
+        //noinspection unchecked
+        T persistableEnvelope = (T) persistenceProtoResolver.fromProto(proto);
+        log.info("Reading {} completed in {} ms", fileName, System.currentTimeMillis() - ts);
+        return persistableEnvelope;
+    } catch (IOException e) {
+        log.error("Reading {} failed with {}.", fileName, e.getMessage(), e);
+        try {
+            // We keep a backup which might be used for recovery
+            FileUtil.removeAndBackupFile(dir, storageFile, fileName, "backup_of_corrupted_data");
+            DevEnv.logErrorAndThrowIfDevMode(e.toString());
+        } catch (IOException e1) {
+            log.error("Backup failed for {}: {}", fileName, e1.getMessage(), e1);
             if (corruptedStorageFileHandler != null) {
                 corruptedStorageFileHandler.addFile(storageFile.getName());
             }
         }
-        return null;
+    } catch (Throwable t) {
+        log.error("Unexpected error reading {}: {}", fileName, t.getMessage(), t);
+        if (corruptedStorageFileHandler != null) {
+            corruptedStorageFileHandler.addFile(storageFile.getName());
+        }
     }
+    return null;
+}
 
     ///////////////////////////////////////////////////////////////////////////////////////////
     // Write file to disk
     ///////////////////////////////////////////////////////////////////////////////////////////
 
     public void requestPersistence() {
-        if (flushAtShutdownCalled) {
+        if (flushAtShutdownCalled.get()) {
             log.warn("We have started the shut down routine already. We ignore that requestPersistence call.");
             try {
                 throw new RuntimeException("We have started the shut down routine already. We ignore that requestPersistence call.");
@@ -419,7 +423,7 @@ public class PersistenceManager<T extends PersistableEnvelope> {
             return;
         }
 
-        persistenceRequested = true;
+        persistenceRequested.set(true);
 
         // If we have not initialized yet we postpone the start of the timer and call maybeStartTimerForPersistence at
         // onAllServicesInitialized
@@ -437,7 +441,7 @@ public class PersistenceManager<T extends PersistableEnvelope> {
             timer = UserThread.runAfter(() -> {
                 persistNow(null);
                 UserThread.execute(() -> timer = null);
-            }, source.delay, TimeUnit.MILLISECONDS);
+            }, source.get().getDelay(), TimeUnit.MILLISECONDS);
         }
     }
 
@@ -455,7 +459,7 @@ public class PersistenceManager<T extends PersistableEnvelope> {
         try {
             // The serialisation is done on the user thread to avoid threading issue with potential mutations of the
             // persistable object. Keeping it on the user thread we are in a synchronize model.
-            protobuf.PersistableEnvelope serialized = (protobuf.PersistableEnvelope) persistable.toPersistableMessage();
+            protobuf.PersistableEnvelope serialized = (protobuf.PersistableEnvelope) persistable.get().toPersistableMessage();
 
             // For the write to disk task we use a thread. We do not have any issues anymore if the persistable objects
             // gets mutated while the thread is running as we have serialized it already and do not operate on the
@@ -464,10 +468,10 @@ public class PersistenceManager<T extends PersistableEnvelope> {
 
             long duration = System.currentTimeMillis() - ts;
             if (duration > 100) {
-                log.info("Serializing {} took {} msec", fileName, duration);
+                log.info("Serializing {} took {} msec", fileName.get(), duration);
             }
         } catch (Throwable e) {
-            log.error("Error in saveToFile toProtoMessage: {}, {}", persistable.getClass().getSimpleName(), fileName);
+            log.error("Error in saveToFile toProtoMessage: {}, {}", persistable.get().getClass().getSimpleName(), fileName.get());
             e.printStackTrace();
             throw new RuntimeException(e);
         }
@@ -493,74 +497,76 @@ public class PersistenceManager<T extends PersistableEnvelope> {
         File tempFile = null;
         FileOutputStream fileOutputStream = null;
 
-        try {
-            // Before we write we backup existing file
-            FileUtil.rollingBackup(dir, fileName, source.getNumMaxBackupFiles());
-
-            if (!dir.exists() && !dir.mkdir())
-                log.warn("make dir failed {}", fileName);
-
-            tempFile = usedTempFilePath != null
-                    ? FileUtil.createNewFile(usedTempFilePath)
-                    : File.createTempFile("temp_" + fileName, null, dir);
-            // Don't use a new temp file path each time, as that causes the delete-on-exit hook to leak memory:
-            tempFile.deleteOnExit();
-
-            fileOutputStream = new FileOutputStream(tempFile);
-
-            if (keyRing != null) {
-                byte[] encryptedBytes = Encryption.encryptPayloadWithHmac(serialized.toByteArray(), keyRing.getSymmetricKey());
-                fileOutputStream.write(encryptedBytes);
-            } else {
-                serialized.writeDelimitedTo(fileOutputStream);
-            }
-
-            // Attempt to force the bits to hit the disk. In reality the OS or hard disk itself may still decide
-            // to not write through to physical media for at least a few seconds, but this is the best we can do.
-            fileOutputStream.flush();
-            fileOutputStream.getFD().sync();
-
-            // Close resources before replacing file with temp file because otherwise it causes problems on windows
-            // when rename temp file
-            fileOutputStream.close();
-
-            FileUtil.renameFile(tempFile, storageFile);
-            usedTempFilePath = tempFile.toPath();
-        } catch (Throwable t) {
-            // If an error occurred, don't attempt to reuse this path again, in case temp file cleanup fails.
-            usedTempFilePath = null;
-            log.error("Error at saveToFile, storageFile={}", fileName, t);
-        } finally {
-            if (tempFile != null && tempFile.exists()) {
-                log.warn("Temp file still exists after failed save. We will delete it now. storageFile={}", fileName);
-                if (!tempFile.delete()) {
-                    log.error("Cannot delete temp file.");
-                }
-            }
-
+        synchronized (writeLock) {
             try {
-                if (fileOutputStream != null) {
-                    fileOutputStream.close();
+                // Before we write we backup existing file
+                FileUtil.rollingBackup(dir, fileName.get(), source.get().getNumMaxBackupFiles());
+
+                if (!dir.exists() && !dir.mkdir())
+                    log.warn("make dir failed {}", fileName.get());
+
+                tempFile = usedTempFilePath.get() != null
+                        ? FileUtil.createNewFile(usedTempFilePath.get())
+                        : File.createTempFile("temp_" + fileName.get(), null, dir);
+                // Don't use a new temp file path each time, as that causes the delete-on-exit hook to leak memory:
+                tempFile.deleteOnExit();
+
+                fileOutputStream = new FileOutputStream(tempFile);
+
+                if (keyRing != null) {
+                    byte[] encryptedBytes = Encryption.encryptPayloadWithHmac(serialized.toByteArray(), keyRing.getSymmetricKey());
+                    fileOutputStream.write(encryptedBytes);
+                } else {
+                    serialized.writeDelimitedTo(fileOutputStream);
                 }
-            } catch (IOException e) {
-                // We swallow that
-                e.printStackTrace();
-                log.error("Cannot close resources." + e.getMessage());
-            }
-            long duration = System.currentTimeMillis() - ts;
-            if (duration > 100) {
-                log.info("Writing the serialized {} completed in {} msec", fileName, duration);
-            }
-            persistenceRequested = false;
-            if (completeHandler != null) {
-                UserThread.execute(completeHandler);
+
+                // Attempt to force the bits to hit the disk. In reality the OS or hard disk itself may still decide
+                // to not write through to physical media for at least a few seconds, but this is the best we can do.
+                fileOutputStream.flush();
+                fileOutputStream.getFD().sync();
+
+                // Close resources before replacing file with temp file because otherwise it causes problems on windows
+                // when rename temp file
+                fileOutputStream.close();
+
+                FileUtil.renameFile(tempFile, storageFile.get());
+                usedTempFilePath.set(tempFile.toPath());
+            } catch (Throwable t) {
+                // If an error occurred, don't attempt to reuse this path again, in case temp file cleanup fails.
+                usedTempFilePath.set(null);
+                log.error("Error at saveToFile, storageFile={}", fileName.get(), t);
+            } finally {
+                if (tempFile != null && tempFile.exists()) {
+                    log.warn("Temp file still exists after failed save. We will delete it now. storageFile={}", fileName.get());
+                    if (!tempFile.delete()) {
+                        log.error("Cannot delete temp file.");
+                    }
+                }
+
+                try {
+                    if (fileOutputStream != null) {
+                        fileOutputStream.close();
+                    }
+                } catch (IOException e) {
+                    // We swallow that
+                    e.printStackTrace();
+                    log.error("Cannot close resources." + e.getMessage());
+                }
+                long duration = System.currentTimeMillis() - ts;
+                if (duration > 100) {
+                    log.info("Writing the serialized {} completed in {} msec", fileName.get(), duration);
+                }
+                persistenceRequested.set(false);
+                if (completeHandler != null) {
+                    UserThread.execute(completeHandler);
+                }
             }
         }
     }
 
     private ExecutorService getWriteToDiskExecutor() {
         if (writeToDiskExecutor == null) {
-            String name = "Write-" + fileName + "_to-disk";
+            String name = "Write-" + fileName.get() + "_to-disk";
             writeToDiskExecutor = SingleThreadExecutorUtils.getSingleThreadExecutor(name);
         }
         return writeToDiskExecutor;
@@ -569,13 +575,13 @@ public class PersistenceManager<T extends PersistableEnvelope> {
     @Override
     public String toString() {
         return "PersistenceManager{" +
-                "\n     fileName='" + fileName + '\'' +
+                "\n     fileName='" + fileName.get() + '\'' +
                 ",\n     dir=" + dir +
-                ",\n     storageFile=" + storageFile +
-                ",\n     persistable=" + persistable +
-                ",\n     source=" + source +
-                ",\n     usedTempFilePath=" + usedTempFilePath +
-                ",\n     persistenceRequested=" + persistenceRequested +
+                ",\n     storageFile=" + storageFile.get() +
+                ",\n     persistable=" + persistable.get() +
+                ",\n     source=" + source.get() +
+                ",\n     usedTempFilePath=" + usedTempFilePath.get() +
+                ",\n     persistenceRequested=" + persistenceRequested.get() +
                 "\n}";
     }
 }
