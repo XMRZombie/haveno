@@ -26,12 +26,13 @@ import haveno.common.util.CollectionUtils;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.annotation.Nullable;
-import java.util.ArrayList;
 import java.util.Collection;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -39,7 +40,9 @@ import java.util.stream.Collectors;
 public class ProtoUtil {
 
     public static Set<byte[]> byteSetFromProtoByteStringList(List<ByteString> byteStringList) {
-        return byteStringList.stream().map(ByteString::toByteArray).collect(Collectors.toSet());
+        return byteStringList.stream()
+                .map(ByteString::toByteArray)
+                .collect(Collectors.toCollection(CopyOnWriteArraySet::new));
     }
 
     /**
@@ -67,14 +70,13 @@ public class ProtoUtil {
     @Nullable
     public static <E extends Enum<E>> E enumFromProto(Class<E> enumType, String name) {
         String enumName = name != null ? name : "UNDEFINED";
-        E result = Enums.getIfPresent(enumType, enumName).orNull();
-        if (result == null) {
-            result = Enums.getIfPresent(enumType, "UNDEFINED").orNull();
+        AtomicReference<E> result = new AtomicReference<>(Enums.getIfPresent(enumType, enumName).orNull());
+        if (result.get() == null) {
+            result.set(Enums.getIfPresent(enumType, "UNDEFINED").orNull());
             log.debug("We try to lookup for an enum entry with name 'UNDEFINED' and use that if available, " +
-                    "otherwise the enum is null. enum={}", result);
-            return result;
+                    "otherwise the enum is null. enum={}", result.get());
         }
-        return result;
+        return result.get();
     }
 
     public static <T extends Message> Iterable<T> collectionToProto(Collection<? extends Proto> collection,
@@ -90,19 +92,21 @@ public class ProtoUtil {
                     }
                 })
                 .filter(Objects::nonNull)
-                .collect(Collectors.toList());
+                .collect(Collectors.toCollection(CopyOnWriteArrayList::new));
     }
 
     public static <T> Iterable<T> collectionToProto(Collection<? extends Proto> collection,
                                                     Function<? super Message, T> extra) {
-        return collection.stream().map(o -> extra.apply(o.toProtoMessage())).collect(Collectors.toList());
+        return collection.stream()
+                .map(o -> extra.apply(o.toProtoMessage()))
+                .collect(Collectors.toCollection(CopyOnWriteArrayList::new));
     }
 
     public static List<String> protocolStringListToList(ProtocolStringList protocolStringList) {
-        return CollectionUtils.isEmpty(protocolStringList) ? new ArrayList<>() : new ArrayList<>(protocolStringList);
+        return CollectionUtils.isEmpty(protocolStringList) ? new CopyOnWriteArrayList<>() : new CopyOnWriteArrayList<>(protocolStringList);
     }
 
     public static Set<String> protocolStringListToSet(ProtocolStringList protocolStringList) {
-        return CollectionUtils.isEmpty(protocolStringList) ? new HashSet<>() : new HashSet<>(protocolStringList);
+        return CollectionUtils.isEmpty(protocolStringList) ? new CopyOnWriteArraySet<>() : new CopyOnWriteArraySet<>(protocolStringList);
     }
 }
