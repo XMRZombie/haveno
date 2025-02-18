@@ -17,6 +17,7 @@
 
 package haveno.desktop.common.view;
 
+import javafx.application.Platform;
 import javafx.scene.Node;
 
 public abstract class ActivatableView<R extends Node, M> extends InitializableView<R, M> {
@@ -33,10 +34,11 @@ public abstract class ActivatableView<R extends Node, M> extends InitializableVi
     protected void prepareInitialize() {
         if (root != null) {
             root.sceneProperty().addListener((ov, oldValue, newValue) -> {
-                if (oldValue == null && newValue != null)
-                    activate();
-                else if (oldValue != null && newValue == null)
-                    deactivate();
+                if (oldValue == null && newValue != null) {
+                    Platform.runLater(this::activate);
+                } else if (oldValue != null && newValue == null) {
+                    Platform.runLater(this::deactivate);
+                }
             });
         }
     }
@@ -47,3 +49,4 @@ public abstract class ActivatableView<R extends Node, M> extends InitializableVi
     protected void deactivate() {
     }
 }
+
