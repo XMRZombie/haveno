@@ -19,43 +19,57 @@ package haveno.common;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class ThreadUtils {
-    
-    private static final Map<String, ExecutorService> EXECUTORS = new HashMap<>();
-    private static final Map<String, Thread> THREADS = new HashMap<>();
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(ThreadUtils.class);
+    private static final Map<String, ExecutorService> EXECUTORS = new ConcurrentHashMap<>();
+    private static final Map<String, AtomicReference<Thread>> THREADS = new ConcurrentHashMap<>();
     private static final int POOL_SIZE = 10;
     private static final ExecutorService POOL = Executors.newFixedThreadPool(POOL_SIZE);
 
+    static {
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            for (String threadId : EXECUTORS.keySet()) {
+                shutDown(threadId);
+            }
+            shutDownPool();
+        }));
+    }
+
     /**
      * Execute the given command in a thread with the given id.
-     * 
+     *
      * @param command the command to execute
      * @param threadId the thread id
      */
+
     public static Future<?> execute(Runnable command, String threadId) {
-        synchronized (EXECUTORS) {
-            if (!EXECUTORS.containsKey(threadId)) EXECUTORS.put(threadId, Executors.newFixedThreadPool(1));
-            return EXECUTORS.get(threadId).submit(() -> {
-                synchronized (THREADS) {
-                    THREADS.put(threadId, Thread.currentThread());
-                }
-                Thread.currentThread().setName(threadId);
+        EXECUTORS.computeIfAbsent(threadId, k -> Executors.newFixedThreadPool(1));
+        return EXECUTORS.get(threadId).submit(() -> {
+            THREADS.computeIfAbsent(threadId, k -> new AtomicReference<>()).set(Thread.currentThread());
+            Thread.currentThread().setName(threadId);
+            try {
                 command.run();
-            });
-        }
+            } finally {
+                THREADS.remove(threadId);
+            }
+        });
     }
 
     /**
      * Awaits execution of the given command, but does not throw its exception.
-     * 
+     *
      * @param command the command to execute
      * @param threadId the thread id
      */
@@ -63,7 +77,8 @@ public class ThreadUtils {
         try {
             execute(command, threadId).get();
         } catch (Exception e) {
-            throw new RuntimeException(e);
+            LOGGER.error("Exception while awaiting command execution", e);
+            throw new RuntimeException("Exception while awaiting command execution", e);
         }
     }
 
@@ -73,32 +88,47 @@ public class ThreadUtils {
 
     public static void shutDown(String threadId, Long timeoutMs) {
         if (timeoutMs == null) timeoutMs = Long.MAX_VALUE;
-        ExecutorService pool = null;
-        synchronized (EXECUTORS) {
-            pool = EXECUTORS.get(threadId);
+        ExecutorService pool = EXECUTORS.get(threadId);
+        if (pool == null) {
+            LOGGER.warn("ExecutorService not found for threadId: {}", threadId);
+            return;
         }
-        if (pool == null) return; // thread not found
         pool.shutdown();
         try {
-            if (!pool.awaitTermination(timeoutMs, TimeUnit.MILLISECONDS)) pool.shutdownNow();
+            if (!pool.awaitTermination(timeoutMs, TimeUnit.MILLISECONDS)) {
+                pool.shutdownNow();
+                LOGGER.warn("ExecutorService did not terminate within the specified timeout for threadId: {}", threadId);
+            }
         } catch (InterruptedException e) {
             pool.shutdownNow();
-            throw new RuntimeException(e);
+            Thread.currentThread().interrupt();
+            LOGGER.error("Interrupted while awaiting termination for threadId: {}", threadId, e);
+            throw new RuntimeException("Interrupted while awaiting termination", e);
         } finally {
             remove(threadId);
         }
     }
 
     public static void remove(String threadId) {
-        synchronized (EXECUTORS) {
-            EXECUTORS.remove(threadId);
-        }
-        synchronized (THREADS) {
-            THREADS.remove(threadId);
-        }
+        EXECUTORS.remove(threadId);
+        THREADS.remove(threadId);
     }
 
     // TODO: consolidate and cleanup apis
+
+    private static void shutDownPool() {
+        POOL.shutdown();
+        try {
+            if (!POOL.awaitTermination(60, TimeUnit.SECONDS)) {
+                POOL.shutdownNow();
+                LOGGER.warn("Shared thread pool did not terminate within the specified timeout");
+            }
+        } catch (InterruptedException e) {
+            POOL.shutdownNow();
+            Thread.currentThread().interrupt();
+            LOGGER.error("Interrupted while awaiting termination of shared thread pool", e);
+        }
+    }
 
     public static Future<?> submitToPool(Runnable task) {
         return submitToPool(Arrays.asList(task)).get(0);
@@ -106,7 +136,9 @@ public class ThreadUtils {
 
     public static List<Future<?>> submitToPool(List<Runnable> tasks) {
         List<Future<?>> futures = new ArrayList<>();
-        for (Runnable task : tasks) futures.add(POOL.submit(task));
+        for (Runnable task : tasks) {
+            futures.add(POOL.submit(task));
+        }
         return futures;
     }
 
@@ -132,20 +164,24 @@ public class ThreadUtils {
         ExecutorService executorService = Executors.newFixedThreadPool(tasks.size());
         try {
             List<Future<?>> futures = new ArrayList<>();
-            for (Runnable task : tasks) futures.add(executorService.submit(task, null));
-            for (Future<?> future : futures) future.get(timeoutMs, TimeUnit.MILLISECONDS);
+            for (Runnable task : tasks) {
+                futures.add(executorService.submit(task, null));
+            }
+            for (Future<?> future : futures) {
+                future.get(timeoutMs, TimeUnit.MILLISECONDS);
+            }
             return futures;
         } catch (Exception e) {
-            throw new RuntimeException(e);
+            LOGGER.error("Exception while awaiting tasks", e);
+            throw new RuntimeException("Exception while awaiting tasks", e);
         } finally {
             executorService.shutdownNow();
         }
     }
 
     private static boolean isCurrentThread(Thread thread, String threadId) {
-        synchronized (THREADS) {
-            if (!THREADS.containsKey(threadId)) return false;
-            return thread == THREADS.get(threadId);
-        }
+        AtomicReference<Thread> threadRef = THREADS.get(threadId);
+        return threadRef != null && threadRef.get() == thread;
     }
 }
+
