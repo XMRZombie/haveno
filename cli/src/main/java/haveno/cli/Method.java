@@ -18,7 +18,7 @@
 package haveno.cli;
 
 /**
- * Currently supported api methods.
+ * Currently supported API methods.
  */
 public enum Method {
     canceloffer,
@@ -31,10 +31,10 @@ public enum Method {
     createcryptopaymentacct,
     getaddressbalance,
     getbalance,
-    getbtcprice,
+    getxmrprice,
     getfundingaddresses,
     @Deprecated // Since 27-Dec-2021.
-    getmyoffer, // Endpoint to be removed from future version.  Use getoffer instead.
+    getmyoffer, // Endpoint to be removed from future version. Use getoffer instead.
     getmyoffers,
     getoffer,
     getoffers,
@@ -46,18 +46,62 @@ public enum Method {
     failtrade,
     unfailtrade,
     gettransaction,
-    gettxfeerate,
-    getunusedbsqaddress,
+    getunusedxmraddress,
     getversion,
     lockwallet,
     registerdisputeagent,
     removewalletpassword,
-    sendbtc,
-    settxfeerate,
     setwalletpassword,
     takeoffer,
     unlockwallet,
-    unsettxfeerate,
     withdrawfunds,
-    stop
+    stop,
+    getxmrseed,
+    getxmrprimaryaddress,
+    getxmrnewsubaddress,
+    getxmrtxs,
+    createxmrtx,
+    relayxmrtxs,
+    getchatmessages,
+    sendchatmessage,
+    getpaymentaccountform,
+    deletepaymentaccount,
+    validateformfield,
+    completetrade,
+    sendxmr,
+    // Account management methods
+    accountexists,
+    isaccountopen,
+    createaccount,
+    openaccount,
+    isappinitialized,
+    changepassword,
+    closeaccount,
+    deleteaccount,
+    backupaccount,
+    restoreaccount,
+    // Dispute methods
+    getdispute,
+    getdisputes,
+    opendispute,
+    resolvedispute,
+    senddisputechatmessage,
+    // XMR connection methods
+    addconnection,
+    removeconnection,
+    getconnection,
+    getconnections,
+    setconnection,
+    checkconnection,
+    checkconnections,
+    startcheckingconnection,
+    stopcheckingconnection,
+    getbestconnection,
+    setautoswitch,
+    getautoswitch,
+    // XMR node methods
+    isxmrnodeonline,
+    getxmrnodesettings,
+    startxmrnode,
+    stopxmrnode
 }
